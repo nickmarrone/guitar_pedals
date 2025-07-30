@@ -1,4 +1,3 @@
-import sys
 import re
 import pandas as pd
 from pathlib import Path
@@ -7,10 +6,12 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 import argparse
 from openpyxl.styles import PatternFill
+from typing import Dict, List, Tuple, Union, Optional, Any
+from excel_reader import read_aion_fx_xlsx_file
 
-EXCLUDED_KEYWORDS = ["ic socket", "enclosure", "dust cover"]
+EXCLUDED_KEYWORDS: List[str] = ["ic socket", "enclosure", "dust cover"]
 
-SORT_ORDER = {
+SORT_ORDER: Dict[str, int] = {
     "Resistor": 0,
     "Capacitor": 1,
     "Diode": 2,
@@ -21,35 +22,6 @@ SORT_ORDER = {
     "Connector": 7,
     "Other": 8,
 }
-
-def extract_relevant_columns(df):
-    # Handle different column structures in original files
-    available_columns = df.columns.tolist()
-    
-    # Map possible column names to our standard names
-    column_mapping = {
-        "Part": ["Part"],
-        "Value": ["Value"],
-        "Description": ["Description"],
-        "Notes": ["Notes", "Link URL (non-Mouser)"]
-    }
-    
-    # Preserve existing Type column if it exists
-    cols_to_extract = []
-    if "Type" in available_columns:
-        cols_to_extract.append("Type")
-    
-    # Add standard columns that exist
-    for standard_name, possible_names in column_mapping.items():
-        for possible_name in possible_names:
-            if possible_name in available_columns:
-                cols_to_extract.append(possible_name)
-                break
-    
-    return df[cols_to_extract]
-
-def normalize_notes(notes):
-    return notes.fillna("").str.strip()
 
 def decode_euro_decimal(val: str) -> str:
     """
@@ -99,7 +71,7 @@ def convert_to_euro_notation(val: str) -> str:
     # If no unit found, return as is
     return val
 
-def parse_resistor_value(value_str):
+def parse_resistor_value(value_str: str) -> float:
     try:
         value_str = decode_euro_decimal(value_str).upper()
         if "M" in value_str:
@@ -113,7 +85,7 @@ def parse_resistor_value(value_str):
     except:
         return float('inf')
 
-def parse_capacitor_value(value_str):
+def parse_capacitor_value(value_str: str) -> Tuple[int, float]:
     """
     Returns a tuple: (unit_rank, numeric_value)
     Where unit_rank is an int representing: pF=0, nF=1, uF=2
@@ -132,7 +104,7 @@ def parse_capacitor_value(value_str):
         return (99, float('inf'))
 
 
-def get_type(description, value=None, part=None):
+def get_type(description: str, value: Optional[str] = None, part: Optional[str] = None) -> str:
     if not isinstance(description, str):
         return "Other"
     d = description.lower()
@@ -168,20 +140,20 @@ def get_type(description, value=None, part=None):
     else:
         return "Other"
 
-def description_is_excluded(desc):
+def description_is_excluded(desc: str) -> bool:
     if not isinstance(desc, str):
         return False
     desc = desc.lower()
     return any(term in desc for term in EXCLUDED_KEYWORDS)
 
-def sort_bom(df):
+def sort_bom(df: pd.DataFrame) -> pd.DataFrame:
     # Check if Part column exists, otherwise use None
     if "Part" in df.columns:
         df["Type"] = df.apply(lambda row: get_type(row["Description"], row["Value"], row["Part"]), axis=1)
     else:
         df["Type"] = df.apply(lambda row: get_type(row["Description"], row["Value"], None), axis=1)
 
-    def sort_key(row):
+    def sort_key(row: pd.Series) -> Tuple[int, Union[float, Tuple[int, float], str]]:
         typ = row["Type"]
         order = SORT_ORDER.get(typ, 99)
         val = row["Value"]
@@ -198,11 +170,11 @@ def sort_bom(df):
     df = df.drop(columns=["SortKey"])
     return df
 
-def sort_combined_bom(df):
+def sort_combined_bom(df: pd.DataFrame) -> pd.DataFrame:
     """
     Sort combined BOM without recalculating Type (since it already exists)
     """
-    def sort_key(row):
+    def sort_key(row: pd.Series) -> Tuple[int, Union[float, Tuple[int, float], str]]:
         typ = row["Type"]
         order = SORT_ORDER.get(typ, 99)
         val = row["Value"]
@@ -219,23 +191,8 @@ def sort_combined_bom(df):
     df = df.drop(columns=["SortKey"])
     return df
 
-def process_bom_file(file_path):
-    xl = pd.ExcelFile(file_path)
-    sheet_names = xl.sheet_names
-
-    # Process all sheets except the first one (Instructions) and any combined sheets
-    # Look for sheets that contain parts data
-    relevant_sheets = []
-    for sheet in sheet_names:
-        if "instruction" not in sheet.lower() and "combined" not in sheet.lower():
-            relevant_sheets.append(sheet)
-    
-    combined_df = pd.DataFrame()
-
-    for sheet in relevant_sheets:
-        df = xl.parse(sheet)
-        df = extract_relevant_columns(df)
-        combined_df = pd.concat([combined_df, df], ignore_index=True)
+def process_bom_file(file_path: str) -> pd.DataFrame:
+    combined_df = read_aion_fx_xlsx_file(file_path)
 
     # Filter out excluded descriptions
     combined_df = combined_df[~combined_df["Description"].apply(description_is_excluded)]
@@ -246,7 +203,7 @@ def process_bom_file(file_path):
     combined_df = combined_df[combined_df["Value"].str.strip() != ""]
 
     combined_df["Part"] = combined_df["Part"].astype(str)
-    combined_df["Notes"] = normalize_notes(combined_df["Notes"])
+    combined_df["Notes"] = combined_df["Notes"].fillna("").str.strip()
     
     # Calculate Type BEFORE grouping
     combined_df["Type"] = combined_df.apply(lambda row: get_type(row["Description"], row["Value"], row["Part"]), axis=1)
@@ -267,10 +224,10 @@ def process_bom_file(file_path):
     
     return grouped
 
-def get_aion_fx_name(file_name):
+def get_aion_fx_name(file_name: str) -> str:
     return Path(file_name).stem.split(" - ")[0]
 
-def count_parts_in_row(part_str):
+def count_parts_in_row(part_str: str) -> int:
     """
     Count the number of parts in a comma-separated part string.
     For example: "Q1, Q2, Q3, Q4, Q5" returns 5
@@ -281,7 +238,7 @@ def count_parts_in_row(part_str):
     parts = [p.strip() for p in str(part_str).split(",") if p.strip()]
     return len(parts)
 
-def autofit_column_widths(ws):
+def autofit_column_widths(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
     for col in ws.columns:
         max_length = 0
         column = col[0].column  # Get the column index (1-based)
@@ -294,7 +251,7 @@ def autofit_column_widths(ws):
         adjusted_width = max_length + 2
         ws.column_dimensions[get_column_letter(column)].width = adjusted_width
 
-def load_resistor_inventory_from_xlsx(filepath):
+def load_resistor_inventory_from_xlsx(filepath: str) -> Dict[str, str]:
     df = pd.read_excel(filepath, sheet_name="TH Resistors", usecols=[0, 1], header=None)
     inventory = {}
     for _, row in df.iterrows():
@@ -305,7 +262,7 @@ def load_resistor_inventory_from_xlsx(filepath):
         inventory[val] = status
     return inventory
 
-def interpret_inventory_amount(raw):
+def interpret_inventory_amount(raw: Any) -> str:
     if pd.isna(raw):
         return "ok"  # NaN/empty amount = plenty in stock
     val = str(raw).strip().lower()
@@ -319,7 +276,7 @@ def interpret_inventory_amount(raw):
     except ValueError:
         return "ok"  # non-numeric = assume available
 
-def load_capacitor_inventory_from_xlsx(filepath):
+def load_capacitor_inventory_from_xlsx(filepath: str) -> Dict[str, Dict[str, Optional[str]]]:
     df = pd.read_excel(filepath, sheet_name="TH Capacitors", header=0)
 
     inventory = {
@@ -358,7 +315,7 @@ def load_capacitor_inventory_from_xlsx(filepath):
 
     return inventory
 
-def highlight_missing_parts(ws, resistor_inv, capacitor_inv):
+def highlight_missing_parts(ws: openpyxl.worksheet.worksheet.Worksheet, resistor_inv: Dict[str, str], capacitor_inv: Dict[str, Dict[str, Optional[str]]]) -> None:
     pink_fill = PatternFill(start_color="ffc0cb", end_color="ffc0cb", fill_type="solid")   # missing
     orange_fill = PatternFill(start_color="ffd8a8", end_color="ffd8a8", fill_type="solid") # few
 
@@ -410,7 +367,7 @@ def highlight_missing_parts(ws, resistor_inv, capacitor_inv):
             for col in range(1, ws.max_column + 1):
                 ws.cell(row=row, column=col).fill = highlight
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Merge Aion FX BOMs into one Excel file.")
     parser.add_argument('--in', nargs='+', dest='input_files', required=True, help='Input BOM .xlsx files')
     parser.add_argument('--out', required=True, help='Output Excel filename')
